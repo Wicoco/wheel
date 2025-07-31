@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
-import Dashboard from "./components/Dashboard";
+import Dashboard from "./components/Dashboards";
 import CreateTeam from "./components/CreateTeam";
 import MeetingRoom from "./components/MeetingRoom";
 
@@ -41,7 +41,7 @@ function App() {
   // Démarrer meeting
   const startMeeting = async (teamId) => {
     try {
-      const response = await axios.post(`${API_BASE}/meetings`, { teamId });
+      const response = await axios.post(`${API_BASE}/meeting`, { teamId });
       setCurrentMeeting(response.data);
       setCurrentView("meeting");
       return response.data;
