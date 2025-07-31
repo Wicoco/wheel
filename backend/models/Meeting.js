@@ -1,40 +1,50 @@
 import mongoose from "mongoose";
 
-const memberTimeSchema = new mongoose.Schema({
+const participantSchema = new mongoose.Schema({
   memberId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: true,
-  },
-  memberName: {
-    type: String,
+    ref: "Member",
     required: true,
   },
   timeSpent: {
     type: Number,
-    required: true,
-    min: 0,
+    default: 0, // en secondes
   },
-  pointsEarned: {
-    type: Number,
-    default: 0,
+  status: {
+    type: String,
+    enum: ["waiting", "speaking", "completed", "overtime"],
+    default: "waiting",
   },
-  hasViolation: {
-    type: Boolean,
-    default: false,
+  notes: {
+    yesterday: String,
+    today: String,
+    blockers: String,
   },
+  startTime: Date,
+  endTime: Date,
 });
 
 const meetingSchema = new mongoose.Schema(
   {
-    team: {
+    teamId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Team",
       required: true,
     },
+    title: {
+      type: String,
+      default: "Daily Standup",
+    },
     status: {
       type: String,
-      enum: ["active", "completed", "cancelled"],
-      default: "active",
+      enum: ["waiting", "in_progress", "completed", "cancelled"],
+      default: "waiting",
+    },
+    participants: [participantSchema],
+    currentSpeaker: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Member",
+      default: null,
     },
     startTime: {
       type: Date,
@@ -42,60 +52,55 @@ const meetingSchema = new mongoose.Schema(
     },
     endTime: {
       type: Date,
+      default: null,
     },
     totalDuration: {
-      type: Number, // en secondes
-      default: 0,
-    },
-    memberTimes: [memberTimeSchema],
-    violations: {
       type: Number,
-      default: 0,
+      default: 0, // en secondes
     },
-    notes: {
+    summary: {
+      totalParticipants: Number,
+      averageTime: Number,
+      overtimeCount: Number,
+      perfectStandups: Number,
+    },
+    slackMessageId: {
       type: String,
-      trim: true,
+      default: null,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-// Méthodes virtuelles
-meetingSchema.virtual("duration").get(function () {
-  if (this.endTime && this.startTime) {
-    return Math.floor((this.endTime - this.startTime) / 1000);
-  }
-  return 0;
-});
+// Index pour les requêtes fréquentes
+meetingSchema.index({ teamId: 1, createdAt: -1 });
+meetingSchema.index({ status: 1 });
 
-// Méthodes du modèle
-meetingSchema.methods.completeMeeting = function (memberTimes) {
-  this.status = "completed";
-  this.endTime = new Date();
-  this.memberTimes = memberTimes;
-  this.totalDuration = this.memberTimes.reduce(
-    (total, member) => total + member.timeSpent,
-    0
-  );
-  this.violations = this.memberTimes.filter(
-    (member) => member.hasViolation
+// Méthode pour calculer le résumé
+meetingSchema.methods.calculateSummary = function () {
+  const participants = this.participants;
+  const totalParticipants = participants.length;
+  const totalTime = participants.reduce((sum, p) => sum + p.timeSpent, 0);
+  const averageTime = totalParticipants > 0 ? totalTime / totalParticipants : 0;
+  const overtimeCount = participants.filter(
+    (p) => p.status === "overtime"
   ).length;
-  return this.save();
+  const perfectStandups = participants.filter(
+    (p) => p.timeSpent <= 120 && p.timeSpent > 0
+  ).length;
+
+  this.summary = {
+    totalParticipants,
+    averageTime: Math.round(averageTime),
+    overtimeCount,
+    perfectStandups,
+  };
+
+  return this;
 };
 
-meetingSchema.statics.getTeamStats = function (teamId) {
-  return this.aggregate([
-    { $match: { team: teamId, status: "completed" } },
-    {
-      $group: {
-        _id: "$team",
-        totalMeetings: { $sum: 1 },
-        averageDuration: { $avg: "$totalDuration" },
-        totalViolations: { $sum: "$violations" },
-        lastMeeting: { $max: "$endTime" },
-      },
-    },
-  ]);
-};
+const Meeting = mongoose.model("Meeting", meetingSchema);
 
-export default mongoose.model("Meeting", meetingSchema);
+export default Meeting;

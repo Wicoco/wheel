@@ -1,82 +1,55 @@
 import mongoose from "mongoose";
 
-const memberSchema = new mongoose.Schema(
-  {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    points: {
-      type: Number,
-      default: 0,
-    },
-    totalMeetings: {
-      type: Number,
-      default: 0,
-    },
-    averageTime: {
-      type: Number,
-      default: 0,
-    },
-    violations: {
-      type: Number,
-      default: 0,
-    },
-  },
-  { timestamps: true }
-);
-
 const teamSchema = new mongoose.Schema(
   {
     name: {
       type: String,
       required: true,
       trim: true,
-      unique: true,
     },
-    members: [memberSchema],
-    totalMeetings: {
-      type: Number,
-      default: 0,
-    },
-    averageDuration: {
-      type: Number,
-      default: 0,
-    },
-    createdBy: {
+    description: {
       type: String,
-      default: "System",
+      trim: true,
+    },
+    scrumMaster: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Member",
+      required: true,
+    },
+    members: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Member",
+      },
+    ],
+    slackChannel: {
+      type: String,
+      default: null,
+    },
+    settings: {
+      maxSpeakingTime: {
+        type: Number,
+        default: 120, // 2 minutes
+      },
+      allowOvertime: {
+        type: Boolean,
+        default: true,
+      },
+      autoSlackNotification: {
+        type: Boolean,
+        default: true,
+      },
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-// Méthodes du modèle
-teamSchema.methods.addPoints = function (memberId, points) {
-  const member = this.members.id(memberId);
-  if (member) {
-    member.points += points;
-    return this.save();
-  }
-  throw new Error("Membre introuvable");
-};
+const Team = mongoose.model("Team", teamSchema);
 
-teamSchema.methods.updateMemberStats = function (
-  memberId,
-  timeSpent,
-  hasViolation = false
-) {
-  const member = this.members.id(memberId);
-  if (member) {
-    member.totalMeetings += 1;
-    member.averageTime =
-      (member.averageTime * (member.totalMeetings - 1) + timeSpent) /
-      member.totalMeetings;
-    if (hasViolation) member.violations += 1;
-    return this.save();
-  }
-  throw new Error("Membre introuvable");
-};
-
-export default mongoose.model("Team", teamSchema);
+export default Team;
