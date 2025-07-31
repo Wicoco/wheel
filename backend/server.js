@@ -7,7 +7,7 @@ import dotenv from "dotenv";
 
 // Routes
 import teamRoutes from "./routes/teams.js";
-import meetingRoutes from "./routes/meetings.js";
+import meetingRoutes from "./routes/meeting.js";
 
 dotenv.config();
 
@@ -34,7 +34,7 @@ mongoose
 
 // Routes
 app.use("/api/teams", teamRoutes);
-app.use("/api/meetings", meetingRoutes);
+app.use("/api/meeting", meetingRoutes);
 
 // Socket.IO pour temps réel
 io.on("connection", (socket) => {
