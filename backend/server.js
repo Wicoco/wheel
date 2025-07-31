@@ -1,65 +1,85 @@
 import express from "express";
-import cors from "cors";
 import mongoose from "mongoose";
-import { createServer } from "http";
-import { Server } from "socket.io";
+import cors from "cors";
 import dotenv from "dotenv";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
-// Routes
-import teamRoutes from "./routes/teams.js";
+// Import routes
+import teamsRoutes from "./routes/teams.js";
 import meetingRoutes from "./routes/meeting.js";
+import slackRoutes from "./routes/slack.js";
 
 dotenv.config();
 
 const app = express();
-const server = createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "http://localhost:3000",
-    methods: ["GET", "POST", "PUT", "DELETE"],
-  },
+const PORT = process.env.PORT || 5000;
+
+// Security middleware
+app.use(helmet());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
 });
+app.use(limiter);
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// CORS configuration
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+  })
+);
 
-// MongoDB Connection
+// Body parsing middleware
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// MongoDB connection
 mongoose
   .connect(
     process.env.MONGODB_URI || "mongodb://localhost:27017/standup-gamifier"
   )
-  .then(() => console.log("✅ MongoDB connecté"))
-  .catch((err) => console.error("❌ Erreur MongoDB:", err));
+  .then(() => console.log("✅ MongoDB connected successfully"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
 
 // Routes
-app.use("/api/teams", teamRoutes);
-app.use("/api/meeting", meetingRoutes);
+app.use("/api/teams", teamsRoutes);
+app.use("/api/meetings", meetingRoutes);
+app.use("/api/slack", slackRoutes);
 
-// Socket.IO pour temps réel
-io.on("connection", (socket) => {
-  console.log("👤 Utilisateur connecté:", socket.id);
-
-  socket.on("joinMeeting", (meetingId) => {
-    socket.join(meetingId);
-    console.log(`📅 Rejoint meeting: ${meetingId}`);
-  });
-
-  socket.on("memberTimer", (data) => {
-    socket.to(data.meetingId).emit("timerUpdate", data);
-  });
-
-  socket.on("disconnect", () => {
-    console.log("👤 Utilisateur déconnecté:", socket.id);
-  });
-});
-
-// Health check
+// Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({ status: "OK", message: "Standup Gamifier API" });
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+// 404 handler
+app.use("*", (req, res) => {
+  res.status(404).json({ error: "Route not found" });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error("Global error:", err);
+  res.status(500).json({
+    error: "Internal server error",
+    message:
+      process.env.NODE_ENV === "development"
+        ? err.message
+        : "Something went wrong",
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(
+    `📱 Frontend: ${process.env.FRONTEND_URL || "http://localhost:3000"}`
+  );
+  console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
 });

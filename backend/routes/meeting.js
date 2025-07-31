@@ -1,223 +1,407 @@
 import express from "express";
 import Meeting from "../models/Meeting.js";
-import Team from "../models/Team.js";
+import Member from "../models/Member.js";
+import Team from "../models/teams.js";
 
 const router = express.Router();
 
-// GET /api/meetings - Récupérer tous les meetings
+// Helper function to check and award achievements
+const checkAndAwardAchievements = async (member, participantData) => {
+  const achievements = [];
+
+  // Speed Demon - under 60 seconds
+  if (participantData.speakingTime <= 60 && participantData.speakingTime > 0) {
+    achievements.push({
+      name: "Speed Demon",
+      description: "Completed standup in under 60 seconds",
+      icon: "⚡",
+      category: "speed",
+    });
+  }
+
+  // Perfect Score - 100 points
+  if (participantData.score >= 100) {
+    achievements.push({
+      name: "Perfect Score",
+      description: "Achieved perfect standup score",
+      icon: "💯",
+      category: "quality",
+    });
+  }
+
+  // Consistency King - 7 consecutive standups
+  if (member.streak >= 7) {
+    achievements.push({
+      name: "Consistency King",
+      description: "7 days streak of standups",
+      icon: "🔥",
+      category: "consistency",
+    });
+  }
+
+  // Add achievements to member
+  achievements.forEach((achievement) => {
+    member.addBadge(achievement);
+  });
+
+  return achievements;
+};
+
+// GET /api/meetings - Get all meetings with filters
 router.get("/", async (req, res) => {
   try {
-    const { status, teamId } = req.query;
+    const { teamId, status, limit = 10, skip = 0 } = req.query;
 
-    let filter = {};
+    const filter = {};
+    if (teamId) filter.teamId = teamId;
     if (status) filter.status = status;
-    if (teamId) filter.team = teamId;
 
     const meetings = await Meeting.find(filter)
-      .populate("team", "name members")
-      .sort({ createdAt: -1 });
+      .populate("teamId", "name slackChannelName")
+      .populate("participants.memberId", "name avatar title")
+      .populate("winner", "name avatar")
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
 
     res.json(meetings);
   } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
+    console.error("Error fetching meetings:", error);
+    res.status(500).json({ error: "Failed to fetch meetings" });
   }
 });
 
-// GET /api/meetings/:id - Récupérer un meeting
+// GET /api/meetings/:id - Get specific meeting
 router.get("/:id", async (req, res) => {
   try {
-    const meeting = await Meeting.findById(req.params.id).populate("team");
+    const meeting = await Meeting.findById(req.params.id)
+      .populate("teamId", "name slackChannelName targetStandupDuration")
+      .populate("participants.memberId", "name avatar title")
+      .populate("winner", "name avatar title");
+
     if (!meeting) {
-      return res.status(404).json({ message: "Meeting introuvable" });
+      return res.status(404).json({ error: "Meeting not found" });
     }
 
     res.json(meeting);
   } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
+    console.error("Error fetching meeting:", error);
+    res.status(500).json({ error: "Failed to fetch meeting" });
   }
 });
 
-// POST /api/meetings - Créer un meeting
+// POST /api/meetings - Create new meeting
 router.post("/", async (req, res) => {
   try {
-    const { teamId } = req.body;
+    const { teamId, name, participants = [] } = req.body;
 
-    if (!teamId) {
-      return res.status(400).json({ message: "ID équipe requis" });
-    }
-
+    // Validate team exists
     const team = await Team.findById(teamId);
     if (!team) {
-      return res.status(404).json({ message: "Équipe introuvable" });
+      return res.status(404).json({ error: "Team not found" });
     }
 
-    // Vérifier s'il y a déjà un meeting actif pour cette équipe
-    const activeMeeting = await Meeting.findOne({
-      team: teamId,
-      status: "active",
-    });
-
-    if (activeMeeting) {
-      return res.status(400).json({
-        message: "Un meeting est déjà en cours pour cette équipe",
-        meeting: activeMeeting,
-      });
+    // If no participants provided, get all active team members
+    let meetingParticipants = participants;
+    if (participants.length === 0) {
+      const members = await Member.find({ teamId, isActive: true });
+      meetingParticipants = members.map((member, index) => ({
+        memberId: member._id,
+        order: index + 1,
+        speakingTime: 0,
+        score: 0,
+      }));
     }
 
+    // Create meeting
     const meeting = new Meeting({
-      team: teamId,
-      status: "active",
+      teamId,
+      name: name || "Daily Standup",
+      startTime: new Date(),
+      status: "planned",
+      participants: meetingParticipants,
     });
 
     await meeting.save();
-    await meeting.populate("team");
 
-    res.status(201).json({
-      message: "Meeting créé avec succès",
-      meeting,
-    });
+    // Populate the response
+    const populatedMeeting = await Meeting.findById(meeting._id)
+      .populate("teamId", "name slackChannelName")
+      .populate("participants.memberId", "name avatar title");
+
+    res.status(201).json(populatedMeeting);
   } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
+    console.error("Error creating meeting:", error);
+    res.status(500).json({ error: "Failed to create meeting" });
   }
 });
 
-// PUT /api/meetings/:id - Terminer un meeting
-router.put("/:id", async (req, res) => {
+// PUT /api/meetings/:id/start - Start a meeting
+router.put("/:id/start", async (req, res) => {
   try {
-    const { memberTimes, status = "completed" } = req.body;
-
-    const meeting = await Meeting.findById(req.params.id).populate("team");
+    const meeting = await Meeting.findById(req.params.id);
     if (!meeting) {
-      return res.status(404).json({ message: "Meeting introuvable" });
+      return res.status(404).json({ error: "Meeting not found" });
     }
 
-    if (meeting.status !== "active") {
-      return res.status(400).json({ message: "Le meeting n'est pas actif" });
+    if (meeting.status !== "planned") {
+      return res.status(400).json({ error: "Meeting cannot be started" });
     }
 
-    // Calculer les données des membres
-    const processedMemberTimes = Object.entries(memberTimes).map(
-      ([memberId, timeSpent]) => {
-        const member = meeting.team.members.id(memberId);
+    meeting.status = "in_progress";
+    meeting.startTime = new Date();
+    await meeting.save();
 
-        // Calculer les points
-        let points = 0;
-        if (timeSpent <= 60) points = 10;
-        else if (timeSpent <= 90) points = 7;
-        else if (timeSpent <= 120) points = 5;
-        else points = 2;
+    const populatedMeeting = await Meeting.findById(meeting._id)
+      .populate("teamId", "name slackChannelName")
+      .populate("participants.memberId", "name avatar title");
 
-        const hasViolation = timeSpent > 120;
+    res.json(populatedMeeting);
+  } catch (error) {
+    console.error("Error starting meeting:", error);
+    res.status(500).json({ error: "Failed to start meeting" });
+  }
+});
 
-        return {
-          memberId,
-          memberName: member ? member.name : "Inconnu",
-          timeSpent: Number(timeSpent),
-          pointsEarned: points,
-          hasViolation,
-        };
-      }
+// PUT /api/meetings/:id/update-participant - Update participant during meeting
+router.put("/:id/update-participant", async (req, res) => {
+  try {
+    const { participantId, speakingTime, score } = req.body;
+
+    const meeting = await Meeting.findById(req.params.id);
+    if (!meeting) {
+      return res.status(404).json({ error: "Meeting not found" });
+    }
+
+    // Find and update participant
+    const participantIndex = meeting.participants.findIndex(
+      (p) => p.memberId.toString() === participantId
     );
 
-    // Bonus pour le plus rapide
-    const minTime = Math.min(...processedMemberTimes.map((m) => m.timeSpent));
-    processedMemberTimes.forEach((member) => {
-      if (member.timeSpent === minTime) {
-        member.pointsEarned += 5; // Bonus rapidité
-      }
-    });
-
-    // Compléter le meeting
-    await meeting.completeMeeting(processedMemberTimes);
-
-    // Mettre à jour les stats de l'équipe et des membres
-    const team = meeting.team;
-    team.totalMeetings += 1;
-
-    for (const memberTime of processedMemberTimes) {
-      const member = team.members.id(memberTime.memberId);
-      if (member) {
-        member.points += memberTime.pointsEarned;
-        member.totalMeetings += 1;
-        member.averageTime =
-          (member.averageTime * (member.totalMeetings - 1) +
-            memberTime.timeSpent) /
-          member.totalMeetings;
-        if (memberTime.hasViolation) member.violations += 1;
-      }
+    if (participantIndex === -1) {
+      return res.status(404).json({ error: "Participant not found" });
     }
 
-    await team.save();
+    meeting.participants[participantIndex].speakingTime = speakingTime;
+    if (score !== undefined) {
+      meeting.participants[participantIndex].score = score;
+    }
 
-    res.json({
-      message: "Meeting terminé avec succès",
-      meeting,
-      pointsAwarded: processedMemberTimes.reduce(
-        (total, member) => total + member.pointsEarned,
-        0
-      ),
-    });
+    await meeting.save();
+
+    const populatedMeeting = await Meeting.findById(meeting._id)
+      .populate("teamId", "name slackChannelName")
+      .populate("participants.memberId", "name avatar title");
+
+    res.json(populatedMeeting);
   } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
+    console.error("Error updating participant:", error);
+    res.status(500).json({ error: "Failed to update participant" });
   }
 });
 
-// DELETE /api/meetings/:id - Annuler un meeting
+// PUT /api/meetings/:id/complete - Complete a meeting
+router.put("/:id/complete", async (req, res) => {
+  try {
+    const { participants, totalDuration } = req.body;
+
+    const meeting = await Meeting.findById(req.params.id);
+    if (!meeting) {
+      return res.status(404).json({ error: "Meeting not found" });
+    }
+
+    // Update meeting data
+    meeting.status = "completed";
+    meeting.endTime = new Date();
+    meeting.completedAt = new Date();
+    meeting.totalDuration =
+      totalDuration ||
+      Math.floor((Date.now() - meeting.startTime.getTime()) / 1000);
+
+    if (participants && participants.length > 0) {
+      meeting.participants = participants;
+
+      // Calculate team score (average of all participant scores)
+      const totalScore = participants.reduce(
+        (sum, p) => sum + (p.score || 0),
+        0
+      );
+      meeting.teamScore =
+        participants.length > 0
+          ? Math.floor(totalScore / participants.length)
+          : 0;
+    }
+
+    await meeting.save();
+
+    // Update team and member statistics
+    const team = await Team.findById(meeting.teamId);
+    if (team) {
+      team.updateStandupStats(meeting.totalDuration, meeting.teamScore);
+      await team.save();
+    }
+
+    // Update individual member stats and check achievements
+    if (participants && participants.length > 0) {
+      for (const participant of participants) {
+        const member = await Member.findById(participant.memberId);
+        if (member) {
+          member.updateStandupStats(
+            participant.speakingTime,
+            participant.score || 0
+          );
+
+          // Check for achievements
+          await checkAndAwardAchievements(member, participant);
+
+          await member.save();
+        }
+      }
+    }
+
+    // Return populated meeting
+    const completedMeeting = await Meeting.findById(meeting._id)
+      .populate("teamId", "name slackChannelName")
+      .populate("participants.memberId", "name avatar title")
+      .populate("winner", "name avatar title");
+
+    res.json(completedMeeting);
+  } catch (error) {
+    console.error("Error completing meeting:", error);
+    res.status(500).json({ error: "Failed to complete meeting" });
+  }
+});
+
+// PUT /api/meetings/:id/cancel - Cancel a meeting
+router.put("/:id/cancel", async (req, res) => {
+  try {
+    const meeting = await Meeting.findById(req.params.id);
+    if (!meeting) {
+      return res.status(404).json({ error: "Meeting not found" });
+    }
+
+    meeting.status = "cancelled";
+    await meeting.save();
+
+    res.json({ message: "Meeting cancelled successfully" });
+  } catch (error) {
+    console.error("Error cancelling meeting:", error);
+    res.status(500).json({ error: "Failed to cancel meeting" });
+  }
+});
+
+// GET /api/meetings/team/:teamId/stats - Get team meeting statistics
+router.get("/team/:teamId/stats", async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { period = "30d" } = req.query;
+
+    // Calculate date range
+    let startDate = new Date();
+    switch (period) {
+      case "7d":
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case "30d":
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      case "90d":
+        startDate.setDate(startDate.getDate() - 90);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 30);
+    }
+
+    const meetings = await Meeting.find({
+      teamId,
+      status: "completed",
+      completedAt: { $gte: startDate },
+    }).populate("participants.memberId", "name avatar");
+
+    // Calculate statistics
+    const stats = {
+      totalMeetings: meetings.length,
+      averageDuration: 0,
+      averageTeamScore: 0,
+      totalParticipants: 0,
+      topPerformers: [],
+      trends: [],
+    };
+
+    if (meetings.length > 0) {
+      // Calculate averages
+      const totalDuration = meetings.reduce(
+        (sum, m) => sum + m.totalDuration,
+        0
+      );
+      const totalScore = meetings.reduce((sum, m) => sum + m.teamScore, 0);
+
+      stats.averageDuration = Math.floor(totalDuration / meetings.length);
+      stats.averageTeamScore = Math.floor(totalScore / meetings.length);
+
+      // Get unique participants
+      const participantMap = new Map();
+      meetings.forEach((meeting) => {
+        meeting.participants.forEach((p) => {
+          if (p.memberId) {
+            const id = p.memberId._id.toString();
+            if (!participantMap.has(id)) {
+              participantMap.set(id, {
+                member: p.memberId,
+                totalScore: 0,
+                totalTime: 0,
+                appearances: 0,
+              });
+            }
+            const participant = participantMap.get(id);
+            participant.totalScore += p.score || 0;
+            participant.totalTime += p.speakingTime || 0;
+            participant.appearances += 1;
+          }
+        });
+      });
+
+      // Calculate top performers
+      stats.topPerformers = Array.from(participantMap.values())
+        .map((p) => ({
+          member: p.member,
+          averageScore: Math.floor(p.totalScore / p.appearances),
+          averageTime: Math.floor(p.totalTime / p.appearances),
+          appearances: p.appearances,
+        }))
+        .sort((a, b) => b.averageScore - a.averageScore)
+        .slice(0, 5);
+
+      stats.totalParticipants = participantMap.size;
+    }
+
+    res.json(stats);
+  } catch (error) {
+    console.error("Error fetching team stats:", error);
+    res.status(500).json({ error: "Failed to fetch team statistics" });
+  }
+});
+
+// DELETE /api/meetings/:id - Delete a meeting
 router.delete("/:id", async (req, res) => {
   try {
     const meeting = await Meeting.findById(req.params.id);
     if (!meeting) {
-      return res.status(404).json({ message: "Meeting introuvable" });
+      return res.status(404).json({ error: "Meeting not found" });
     }
 
-    if (meeting.status === "active") {
-      meeting.status = "cancelled";
-      await meeting.save();
-    } else {
-      await Meeting.findByIdAndDelete(req.params.id);
+    // Only allow deletion of planned or cancelled meetings
+    if (meeting.status === "in_progress" || meeting.status === "completed") {
+      return res
+        .status(400)
+        .json({ error: "Cannot delete active or completed meetings" });
     }
 
-    res.json({ message: "Meeting supprimé avec succès" });
+    await Meeting.findByIdAndDelete(req.params.id);
+    res.json({ message: "Meeting deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
-  }
-});
-
-// GET /api/meetings/team/:teamId/stats - Stats des meetings d'une équipe
-router.get("/team/:teamId/stats", async (req, res) => {
-  try {
-    const stats = await Meeting.aggregate([
-      {
-        $match: {
-          team: new mongoose.Types.ObjectId(req.params.teamId),
-          status: "completed",
-        },
-      },
-      {
-        $group: {
-          _id: "$team",
-          totalMeetings: { $sum: 1 },
-          averageDuration: { $avg: "$totalDuration" },
-          totalViolations: { $sum: "$violations" },
-          shortestMeeting: { $min: "$totalDuration" },
-          longestMeeting: { $max: "$totalDuration" },
-          lastMeeting: { $max: "$endTime" },
-        },
-      },
-    ]);
-
-    const result = stats[0] || {
-      totalMeetings: 0,
-      averageDuration: 0,
-      totalViolations: 0,
-      shortestMeeting: 0,
-      longestMeeting: 0,
-      lastMeeting: null,
-    };
-
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ message: "Erreur serveur", error: error.message });
+    console.error("Error deleting meeting:", error);
+    res.status(500).json({ error: "Failed to delete meeting" });
   }
 });
 

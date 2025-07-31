@@ -1,106 +1,140 @@
 import mongoose from "mongoose";
 
-const participantSchema = new mongoose.Schema({
-  memberId: {
+const meetingSchema = new mongoose.Schema({
+  // Core identifiers
+  teamId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "Member",
+    ref: "Team",
     required: true,
   },
-  timeSpent: {
-    type: Number,
-    default: 0, // en secondes
+  name: {
+    type: String,
+    default: "Daily Standup",
   },
+
+  // Timing information
+  startTime: {
+    type: Date,
+    required: true,
+  },
+  endTime: {
+    type: Date,
+  },
+  totalDuration: {
+    type: Number,
+    default: 0,
+  }, // in seconds
+
+  // Participants and their performance
+  participants: [
+    {
+      memberId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Member",
+        required: true,
+      },
+      speakingTime: {
+        type: Number,
+        default: 0,
+      }, // in seconds
+      order: {
+        type: Number,
+        required: true,
+      }, // speaking order (1, 2, 3...)
+      score: {
+        type: Number,
+        default: 0,
+      }, // calculated performance score
+      feedback: {
+        type: String,
+        maxlength: 500,
+      },
+    },
+  ],
+
+  // Meeting results
+  winner: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Member",
+  },
+  teamScore: {
+    type: Number,
+    default: 0,
+  },
+  averageSpeakingTime: {
+    type: Number,
+    default: 0,
+  },
+
+  // Meeting status
   status: {
     type: String,
-    enum: ["waiting", "speaking", "completed", "overtime"],
-    default: "waiting",
+    enum: ["planned", "in_progress", "completed", "cancelled"],
+    default: "planned",
   },
+
+  // Additional metadata
   notes: {
-    yesterday: String,
-    today: String,
-    blockers: String,
+    type: String,
+    maxlength: 1000,
   },
-  startTime: Date,
-  endTime: Date,
+  slackMessageId: String, // for Slack integration
+
+  // Timestamps
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  completedAt: {
+    type: Date,
+  },
 });
 
-const meetingSchema = new mongoose.Schema(
-  {
-    teamId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Team",
-      required: true,
-    },
-    title: {
-      type: String,
-      default: "Daily Standup",
-    },
-    status: {
-      type: String,
-      enum: ["waiting", "in_progress", "completed", "cancelled"],
-      default: "waiting",
-    },
-    participants: [participantSchema],
-    currentSpeaker: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Member",
-      default: null,
-    },
-    startTime: {
-      type: Date,
-      default: Date.now,
-    },
-    endTime: {
-      type: Date,
-      default: null,
-    },
-    totalDuration: {
-      type: Number,
-      default: 0, // en secondes
-    },
-    summary: {
-      totalParticipants: Number,
-      averageTime: Number,
-      overtimeCount: Number,
-      perfectStandups: Number,
-    },
-    slackMessageId: {
-      type: String,
-      default: null,
-    },
-  },
-  {
-    timestamps: true,
-  }
-);
-
-// Index pour les requêtes fréquentes
+// Indexes for better query performance
 meetingSchema.index({ teamId: 1, createdAt: -1 });
 meetingSchema.index({ status: 1 });
 
-// Méthode pour calculer le résumé
-meetingSchema.methods.calculateSummary = function () {
-  const participants = this.participants;
-  const totalParticipants = participants.length;
-  const totalTime = participants.reduce((sum, p) => sum + p.timeSpent, 0);
-  const averageTime = totalParticipants > 0 ? totalTime / totalParticipants : 0;
-  const overtimeCount = participants.filter(
-    (p) => p.status === "overtime"
-  ).length;
-  const perfectStandups = participants.filter(
-    (p) => p.timeSpent <= 120 && p.timeSpent > 0
-  ).length;
+// Pre-save middleware to calculate derived fields
+meetingSchema.pre("save", function (next) {
+  if (this.participants && this.participants.length > 0) {
+    // Calculate total duration if not set
+    if (!this.totalDuration && this.startTime && this.endTime) {
+      this.totalDuration = Math.floor((this.endTime - this.startTime) / 1000);
+    }
 
-  this.summary = {
-    totalParticipants,
-    averageTime: Math.round(averageTime),
-    overtimeCount,
-    perfectStandups,
+    // Calculate average speaking time
+    const totalSpeakingTime = this.participants.reduce(
+      (sum, p) => sum + p.speakingTime,
+      0
+    );
+    this.averageSpeakingTime = Math.floor(
+      totalSpeakingTime / this.participants.length
+    );
+
+    // Determine winner (highest score)
+    const topPerformer = this.participants.reduce((best, current) =>
+      current.score > best.score ? current : best
+    );
+    this.winner = topPerformer.memberId;
+  }
+
+  next();
+});
+
+// Virtual for duration in minutes
+meetingSchema.virtual("durationInMinutes").get(function () {
+  return this.totalDuration ? Math.floor(this.totalDuration / 60) : 0;
+});
+
+// Virtual for human-readable status
+meetingSchema.virtual("statusDisplay").get(function () {
+  const statusMap = {
+    planned: "Scheduled",
+    in_progress: "Live",
+    completed: "Completed",
+    cancelled: "Cancelled",
   };
+  return statusMap[this.status] || this.status;
+});
 
-  return this;
-};
-
-const Meeting = mongoose.model("Meeting", meetingSchema);
-
-export default Meeting;
+export default mongoose.model("Meeting", meetingSchema);

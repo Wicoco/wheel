@@ -1,259 +1,154 @@
-import { useState, useEffect } from "react";
-import axios from "axios";
+import React, { useState, useEffect } from "react";
+import { Play, Pause, SkipForward, Trophy, Clock } from "lucide-react";
 import Timer from "./Timer";
+import apiService from "../services/api";
 
-function MeetingRoom({ meeting, onEnd }) {
+const MeetingRoom = ({ team, onComplete }) => {
   const [currentMemberIndex, setCurrentMemberIndex] = useState(0);
-  const [memberTimes, setMemberTimes] = useState({});
   const [isRunning, setIsRunning] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [violations, setViolations] = useState([]);
+  const [participants, setParticipants] = useState([]);
+  const [totalTime, setTotalTime] = useState(0);
 
-  const currentMember = meeting.team.members[currentMemberIndex];
-  const isLastMember = currentMemberIndex === meeting.team.members.length - 1;
+  useEffect(() => {
+    // Initialiser les participants
+    setParticipants(
+      team.members.map((member) => ({
+        ...member,
+        speakingTime: 0,
+        score: 0,
+        order: team.members.indexOf(member) + 1,
+      }))
+    );
+  }, [team]);
 
-  // Démarrer le timer pour un membre
-  const startMemberTimer = () => {
-    setIsRunning(true);
-    setCurrentTime(0);
+  const currentMember = participants[currentMemberIndex];
+
+  const handleNext = async () => {
+    if (currentMemberIndex < participants.length - 1) {
+      setCurrentMemberIndex((prev) => prev + 1);
+    } else {
+      // Fin du standup
+      await completeStandup();
+    }
   };
 
-  // Passer au membre suivant
-  const nextMember = () => {
-    // Sauvegarder le temps du membre actuel
-    const memberId = currentMember._id;
-    setMemberTimes((prev) => ({
-      ...prev,
-      [memberId]: currentTime,
-    }));
-
-    // Vérifier les violations
-    if (currentTime > 120) {
-      // Plus de 2 minutes
-      setViolations((prev) => [
-        ...prev,
-        {
-          member: currentMember.name,
-          time: currentTime,
-          type: "overtime",
-        },
-      ]);
-    }
-
+  const completeStandup = async () => {
     setIsRunning(false);
 
-    if (isLastMember) {
-      // Fin du meeting
-      finishMeeting();
-    } else {
-      // Membre suivant
-      setCurrentMemberIndex((prev) => prev + 1);
-      setCurrentTime(0);
-    }
+    // Calculer les scores
+    const scoredParticipants = participants.map((p) => ({
+      ...p,
+      score: calculateScore(p.speakingTime),
+    }));
+
+    // Sauvegarder en DB
+    const meetingData = {
+      teamId: team._id,
+      participants: scoredParticipants,
+      totalDuration: totalTime,
+      status: "completed",
+    };
+
+    await apiService.completeStandup(meetingData);
+    onComplete(scoredParticipants);
   };
 
-  // Terminer le meeting
-  const finishMeeting = async () => {
-    try {
-      const totalTime = Object.values(memberTimes).reduce(
-        (sum, time) => sum + time,
-        currentTime
-      );
-
-      await axios.put(`/api/meetings/${meeting._id}`, {
-        status: "completed",
-        duration: totalTime,
-        memberTimes,
-        violations,
-      });
-
-      // Calculer et attribuer les points
-      await calculatePoints();
-
-      onEnd();
-    } catch (error) {
-      console.error("Erreur fin meeting:", error);
-    }
-  };
-
-  // Calculer les points
-  const calculatePoints = async () => {
-    try {
-      const pointsData = meeting.team.members.map((member) => {
-        const memberTime = memberTimes[member._id] || 0;
-        let points = 0;
-
-        // Points basés sur le temps
-        if (memberTime <= 60) points += 10; // ≤ 1 min = 10 pts
-        else if (memberTime <= 90) points += 7; // ≤ 1.5 min = 7 pts
-        else if (memberTime <= 120) points += 5; // ≤ 2 min = 5 pts
-        else points += 2; // > 2 min = 2 pts
-
-        // Bonus pour finir en premier
-        const times = Object.values(memberTimes);
-        if (times.length > 0 && memberTime === Math.min(...times)) {
-          points += 5;
-        }
-
-        return {
-          memberId: member._id,
-          points,
-        };
-      });
-
-      await axios.post(`/api/teams/${meeting.team._id}/points`, { pointsData });
-    } catch (error) {
-      console.error("Erreur calcul points:", error);
-    }
+  const calculateScore = (timeInSeconds) => {
+    // Logique de scoring basée sur le temps
+    if (timeInSeconds <= 60) return 100;
+    if (timeInSeconds <= 90) return 80;
+    if (timeInSeconds <= 120) return 60;
+    return Math.max(20, 100 - timeInSeconds);
   };
 
   return (
-    <div className="max-w-4xl mx-auto">
-      {/* Header Meeting */}
-      <div className="card mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-900">
-              🎯 Meeting en cours
-            </h2>
-            <p className="text-gray-600">
-              Équipe: {meeting.team.name} • Membre {currentMemberIndex + 1}/
-              {meeting.team.members.length}
-            </p>
-          </div>
-          <button onClick={onEnd} className="text-red-500 hover:text-red-700">
-            ❌ Terminer
-          </button>
-        </div>
+    <div className="max-w-4xl mx-auto p-6 bg-white rounded-xl shadow-lg">
+      {/* Header avec équipe */}
+      <div className="text-center mb-8">
+        <h1 className="text-3xl font-bold text-gray-800">{team.name}</h1>
+        <p className="text-gray-600">Daily Standup en cours</p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Timer Principal */}
-        <div className="lg:col-span-2">
-          <div className="card text-center">
-            <h3 className="text-xl font-semibold mb-4">
-              🎤 C'est au tour de:{" "}
-              <span className="text-primary">{currentMember.name}</span>
-            </h3>
+      {/* Membre actuel */}
+      <div className="text-center mb-8">
+        <img
+          src={currentMember?.avatar}
+          alt={currentMember?.name}
+          className="w-24 h-24 rounded-full mx-auto mb-4"
+        />
+        <h2 className="text-2xl font-semibold">{currentMember?.name}</h2>
+        <p className="text-gray-600">{currentMember?.title}</p>
+      </div>
 
-            <Timer
-              time={currentTime}
-              isRunning={isRunning}
-              onTimeUpdate={setCurrentTime}
-            />
+      {/* Timer principal */}
+      <div className="flex justify-center mb-8">
+        <Timer
+          isRunning={isRunning}
+          onTimeUpdate={(time) => {
+            setTotalTime((prev) => prev + 1);
+            setParticipants((prev) =>
+              prev.map((p, idx) =>
+                idx === currentMemberIndex ? { ...p, speakingTime: time } : p
+              )
+            );
+          }}
+        />
+      </div>
 
-            {/* Instructions */}
-            <div className="bg-blue-50 rounded-lg p-4 mb-6 text-left">
-              <h4 className="font-semibold text-blue-900 mb-2">
-                📋 Questions Standup:
-              </h4>
-              <ul className="space-y-1 text-blue-800 text-sm">
-                <li>• Qu'est-ce que j'ai fait hier ?</li>
-                <li>• Qu'est-ce que je vais faire aujourd'hui ?</li>
-                <li>• Ai-je des blocages ?</li>
-              </ul>
-            </div>
+      {/* Contrôles */}
+      <div className="flex justify-center space-x-4 mb-8">
+        <button
+          onClick={() => setIsRunning(!isRunning)}
+          className="flex items-center px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+        >
+          {isRunning ? <Pause size={20} /> : <Play size={20} />}
+          <span className="ml-2">{isRunning ? "Pause" : "Start"}</span>
+        </button>
 
-            {/* Actions */}
-            <div className="space-y-3">
-              {!isRunning ? (
-                <button
-                  onClick={startMemberTimer}
-                  className="btn-success w-full text-lg"
-                >
-                  ▶️ Commencer
-                </button>
-              ) : (
-                <button
-                  onClick={nextMember}
-                  className="btn-primary w-full text-lg"
-                >
-                  {isLastMember ? "🏁 Terminer Meeting" : "➡️ Membre Suivant"}
-                </button>
-              )}
-            </div>
+        <button
+          onClick={handleNext}
+          className="flex items-center px-6 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600"
+        >
+          <SkipForward size={20} />
+          <span className="ml-2">
+            {currentMemberIndex < participants.length - 1 ? "Next" : "Finish"}
+          </span>
+        </button>
+      </div>
 
-            {/* Alerte temps */}
-            {currentTime > 90 && (
-              <div className="mt-4 p-3 bg-orange-100 border border-orange-200 rounded-lg">
-                <p className="text-orange-800 font-medium">
-                  ⚠️ Attention: Temps recommandé dépassé (1m30s)
-                </p>
-              </div>
-            )}
-
-            {currentTime > 120 && (
-              <div className="mt-2 p-3 bg-red-100 border border-red-200 rounded-lg">
-                <p className="text-red-800 font-medium">
-                  🚨 Violation: Plus de 2 minutes!
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Sidebar - Progression */}
-        <div className="space-y-4">
-          {/* Progression */}
-          <div className="card">
-            <h4 className="font-semibold mb-4">📊 Progression</h4>
-            <div className="space-y-3">
-              {meeting.team.members.map((member, index) => (
-                <div key={member._id} className="flex items-center space-x-3">
-                  <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                      index < currentMemberIndex
-                        ? "bg-green-100 text-green-800"
-                        : index === currentMemberIndex
-                        ? "bg-blue-100 text-blue-800"
-                        : "bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    {index < currentMemberIndex ? "✓" : index + 1}
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-sm font-medium">{member.name}</div>
-                    {memberTimes[member._id] && (
-                      <div className="text-xs text-gray-500">
-                        {Math.floor(memberTimes[member._id] / 60)}:
-                        {String(memberTimes[member._id] % 60).padStart(2, "0")}
-                      </div>
-                    )}
-                  </div>
-                  {index === currentMemberIndex && (
-                    <div className="text-blue-500">👤</div>
-                  )}
+      {/* Progress des membres */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {participants.map((member, index) => (
+          <div
+            key={member._id}
+            className={`p-4 rounded-lg border-2 ${
+              index === currentMemberIndex
+                ? "border-blue-500 bg-blue-50"
+                : index < currentMemberIndex
+                ? "border-green-500 bg-green-50"
+                : "border-gray-300 bg-gray-50"
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <img
+                src={member.avatar}
+                alt={member.name}
+                className="w-12 h-12 rounded-full"
+              />
+              <div>
+                <h3 className="font-semibold">{member.name}</h3>
+                <div className="flex items-center text-sm text-gray-600">
+                  <Clock size={16} className="mr-1" />
+                  {Math.floor(member.speakingTime / 60)}:
+                  {(member.speakingTime % 60).toString().padStart(2, "0")}
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Violations */}
-          {violations.length > 0 && (
-            <div className="card">
-              <h4 className="font-semibold mb-4 text-red-700">⚠️ Violations</h4>
-              <div className="space-y-2">
-                {violations.map((violation, index) => (
-                  <div
-                    key={index}
-                    className="text-sm bg-red-50 border border-red-200 rounded p-2"
-                  >
-                    <div className="font-medium text-red-800">
-                      {violation.member}
-                    </div>
-                    <div className="text-red-600">
-                      Dépassement: {Math.floor(violation.time / 60)}:
-                      {String(violation.time % 60).padStart(2, "0")}
-                    </div>
-                  </div>
-                ))}
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        ))}
       </div>
     </div>
   );
-}
+};
 
 export default MeetingRoom;
